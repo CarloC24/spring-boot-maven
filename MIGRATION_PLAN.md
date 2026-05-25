@@ -31,6 +31,53 @@ The CLAUDE.md in the repo is stale (claims no Spring Boot deps); plan reflects t
 - `propertyFileWillOverride`: `true`
 - Postgres driver declared as a `<dependency>` inside the plugin block so `mvn liquibase:*` has the driver on its classpath.
 
+**Code — add inside `<dependencies>`:**
+```xml
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-jdbc</artifactId>
+</dependency>
+<dependency>
+  <groupId>org.postgresql</groupId>
+  <artifactId>postgresql</artifactId>
+  <scope>runtime</scope>
+</dependency>
+<dependency>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-docker-compose</artifactId>
+  <scope>runtime</scope>
+  <optional>true</optional>
+</dependency>
+<!--
+  NOTE: Liquibase is intentionally NOT a runtime dependency.
+  Migrations are applied manually via the liquibase-maven-plugin
+  below, so they can never run on Spring Boot startup.
+-->
+```
+
+**Code — add a `<build><plugins>` block (the current pom only uses `<pluginManagement>`, so add this new section just before `</build>`):**
+```xml
+<plugins>
+  <plugin>
+    <groupId>org.liquibase</groupId>
+    <artifactId>liquibase-maven-plugin</artifactId>
+    <version>4.29.2</version>
+    <configuration>
+      <changeLogFile>src/main/resources/db/changelog/db.changelog-master.yaml</changeLogFile>
+      <propertyFile>src/main/resources/liquibase.properties</propertyFile>
+      <propertyFileWillOverride>true</propertyFileWillOverride>
+    </configuration>
+    <dependencies>
+      <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>42.7.4</version>
+      </dependency>
+    </dependencies>
+  </plugin>
+</plugins>
+```
+
 ### 2. `compose.yaml` (new, project root)
 Single `postgres:16` service:
 - container name `spring-boot-maven-postgres`
@@ -40,18 +87,58 @@ Single `postgres:16` service:
 
 Spring Boot's docker-compose support discovers this automatically — no JDBC URL needed in properties for local runs.
 
+**Code — full file:**
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    container_name: spring-boot-maven-postgres
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+```
+
 ### 3. `src/main/resources/application.yml` (new)
 - No `spring.liquibase.*` section at all (Liquibase isn't on the runtime classpath, so nothing to disable — but if a future contributor adds it, also set `spring.liquibase.enabled: false` as a belt-and-suspenders guard).
-- Leave datasource unset for local (docker-compose module fills it). Add commented example for non-Docker runs:
-  ```
-  # spring.datasource.url: jdbc:postgresql://localhost:5432/appdb
-  # spring.datasource.username: app
-  # spring.datasource.password: app
-  ```
+- Leave datasource unset for local (docker-compose module fills it). Add commented example for non-Docker runs.
+
+**Code — full file:**
+```yaml
+spring:
+  application:
+    name: example-springboot-maven-project
+
+  # Belt-and-suspenders: if anyone ever adds liquibase-core to the
+  # runtime classpath, this keeps Spring from auto-running migrations.
+  liquibase:
+    enabled: false
+
+  # Local dev: spring-boot-docker-compose fills these in from compose.yaml.
+  # Uncomment for non-Docker runs against a host-installed Postgres.
+  # datasource:
+  #   url: jdbc:postgresql://localhost:5432/appdb
+  #   username: app
+  #   password: app
+```
 
 ### 3b. `src/main/resources/liquibase.properties` (new)
-Used by the Maven plugin only (not loaded by Spring). Points at the same local Postgres that docker-compose runs:
-```
+Used by the Maven plugin only (not loaded by Spring). Points at the same local Postgres that docker-compose runs.
+
+**Code — full file:**
+```properties
 url=jdbc:postgresql://localhost:5432/appdb
 username=app
 password=app
@@ -77,6 +164,36 @@ databaseChangeLog:
 - `rollback` block dropping the table (Liquibase best practice — every changeset should be rollback-safe).
 
 Note: table named `users` (plural, lowercased) because `user` is a reserved word in Postgres.
+
+**Code — full file:**
+```yaml
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-users-table
+      author: carloc
+      changes:
+        - createTable:
+            tableName: users
+            columns:
+              - column:
+                  name: id
+                  type: BIGINT
+                  autoIncrement: true
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: name
+                  type: VARCHAR(255)
+                  constraints:
+                    nullable: false
+              - column:
+                  name: age
+                  type: INT
+      rollback:
+        - dropTable:
+            tableName: users
+```
 
 ### 5. `.gitignore` — confirm `target/` ignored (already is via Maven defaults; no change needed unless missing).
 
